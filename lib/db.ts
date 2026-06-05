@@ -522,3 +522,141 @@ export async function denyAssignment(assignmentId: string): Promise<void> {
     assignmentId,
   );
 }
+
+// ----- Kid-side queries -----
+
+export interface KidQuest extends Quest {
+  status: 'available' | 'submitted' | 'done_today';
+  assignment_id: string | null;
+}
+
+/**
+ * Compute the "window start" timestamp for a given frequency.
+ * Anything completed at or after this timestamp counts as "already done this period".
+ */
+function windowStart(frequency: QuestFrequency, now: number): number {
+  const d = new Date(now);
+  if (frequency === 'once') return 0;
+  if (frequency === 'daily') {
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  if (frequency === 'weekly') {
+    const day = d.getDay(); // 0 = Sunday
+    d.setDate(d.getDate() - day);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  if (frequency === 'monthly') {
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  return 0;
+}
+
+/**
+ * List the quests that are currently actionable for a child:
+ * - Assigned to this child
+ * - Not already completed (in pending/submitted/approved state) in the current frequency window
+ *
+ * Also returns the latest assignment id and its status if one exists in the current window.
+ */
+export async function listKidQuests(childId: string): Promise<KidQuest[]> {
+  const db = await getDb();
+  const now = Date.now();
+  const quests = await db.getAllAsync<Quest>(
+    `SELECT q.* FROM quests q
+     JOIN quest_children qc ON qc.quest_id = q.id
+     WHERE qc.child_id = ? AND q.is_active = 1
+     ORDER BY q.created_at DESC`,
+    childId,
+  );
+
+  const result: KidQuest[] = [];
+  for (const q of quests) {
+    const since = windowStart(q.frequency, now);
+    const latest = await db.getFirstAsync<{
+      id: string;
+      status: AssignmentStatus;
+      completed_at: number | null;
+    }>(
+      `SELECT id, status, completed_at FROM quest_assignments
+       WHERE quest_id = ? AND child_id = ?
+         AND (completed_at IS NULL OR completed_at >= ?)
+         AND status != 'rejected'
+       ORDER BY COALESCE(completed_at, 0) DESC LIMIT 1`,
+      q.id,
+      childId,
+      since,
+    );
+
+    if (!latest) {
+      result.push({ ...q, status: 'available', assignment_id: null });
+    } else if (latest.status === 'submitted') {
+      result.push({ ...q, status: 'submitted', assignment_id: latest.id });
+    } else if (latest.status === 'approved') {
+      // already done this window
+      result.push({ ...q, status: 'done_today', assignment_id: latest.id });
+    } else {
+      // 'pending' shouldn't really happen with current flow; treat as available
+      result.push({ ...q, status: 'available', assignment_id: latest.id });
+    }
+  }
+  return result;
+}
+
+export interface MarkDoneResult {
+  awarded: boolean;
+  currency_delta: number;
+  assignment_id: string;
+}
+
+/**
+ * Mark a quest done for a child.
+ * - If quest.requires_approval=true → creates a 'submitted' assignment, no currency yet
+ * - If quest.requires_approval=false → creates an 'approved' assignment and awards currency immediately
+ */
+export async function markQuestDone(
+  questId: string,
+  childId: string,
+): Promise<MarkDoneResult> {
+  const db = await getDb();
+  const quest = await db.getFirstAsync<Quest>(
+    'SELECT * FROM quests WHERE id = ?',
+    questId,
+  );
+  if (!quest) throw new Error('Quest not found');
+
+  const id = uuid();
+  const now = Date.now();
+  const isInstant = quest.requires_approval === 0;
+  const status: AssignmentStatus = isInstant ? 'approved' : 'submitted';
+  let awarded = false;
+  let delta = 0;
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT INTO quest_assignments (id, quest_id, child_id, due_date, status, photo_url, completed_at, approved_at)
+       VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)`,
+      id,
+      questId,
+      childId,
+      status,
+      now,
+      isInstant ? now : null,
+    );
+
+    if (isInstant && quest.reward_type === 'currency') {
+      await db.runAsync(
+        'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+        quest.currency_value,
+        childId,
+      );
+      awarded = true;
+      delta = quest.currency_value;
+    }
+  });
+
+  return { awarded, currency_delta: delta, assignment_id: id };
+}
