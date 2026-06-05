@@ -6,7 +6,7 @@ import { useAppStore } from '../lib/store';
 
 export default function Onboarding() {
   const router = useRouter();
-  const { setFamily } = useAppStore();
+  const { setFamily, unlockParent } = useAppStore();
 
   const [familyName, setFamilyName] = useState('');
   const [pin, setPin] = useState('');
@@ -27,6 +27,7 @@ export default function Onboarding() {
     }
     const family = await createFamily(familyName.trim(), pin);
     setFamily(family);
+    unlockParent();
     router.replace('/(parent)/dashboard');
   };
 
