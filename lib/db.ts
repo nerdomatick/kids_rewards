@@ -320,21 +320,19 @@ export async function adjustChildCurrency(
   note: string,
 ): Promise<void> {
   const db = await getDb();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
-      delta,
-      childId,
-    );
-    await db.runAsync(
-      'INSERT INTO behavior_events (id, child_id, label, currency_delta, created_at) VALUES (?, ?, ?, ?, ?)',
-      uuid(),
-      childId,
-      note,
-      delta,
-      Date.now(),
-    );
-  });
+  await db.runAsync(
+    'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+    delta,
+    childId,
+  );
+  await db.runAsync(
+    'INSERT INTO behavior_events (id, child_id, label, currency_delta, created_at) VALUES (?, ?, ?, ?, ?)',
+    uuid(),
+    childId,
+    note,
+    delta,
+    Date.now(),
+  );
 }
 
 // ----- Quests -----
@@ -375,60 +373,56 @@ export async function listQuests(familyId: string): Promise<QuestWithChildren[]>
 export async function addQuest(familyId: string, input: QuestInput): Promise<string> {
   const db = await getDb();
   const id = uuid();
-  await db.withTransactionAsync(async () => {
+  await db.runAsync(
+    `INSERT INTO quests (id, family_id, title, icon_emoji, icon_uri, reward_type, currency_value,
+      reward_item_name, frequency, requires_approval, is_active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+    id,
+    familyId,
+    input.title,
+    input.icon_emoji ?? null,
+    input.icon_uri ?? null,
+    input.reward_type,
+    input.currency_value,
+    input.reward_item_name ?? null,
+    input.frequency,
+    input.requires_approval ? 1 : 0,
+    Date.now(),
+  );
+  for (const cid of input.child_ids) {
     await db.runAsync(
-      `INSERT INTO quests (id, family_id, title, icon_emoji, icon_uri, reward_type, currency_value,
-        reward_item_name, frequency, requires_approval, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      'INSERT INTO quest_children (quest_id, child_id) VALUES (?, ?)',
       id,
-      familyId,
-      input.title,
-      input.icon_emoji ?? null,
-      input.icon_uri ?? null,
-      input.reward_type,
-      input.currency_value,
-      input.reward_item_name ?? null,
-      input.frequency,
-      input.requires_approval ? 1 : 0,
-      Date.now(),
+      cid,
     );
-    for (const cid of input.child_ids) {
-      await db.runAsync(
-        'INSERT INTO quest_children (quest_id, child_id) VALUES (?, ?)',
-        id,
-        cid,
-      );
-    }
-  });
+  }
   return id;
 }
 
 export async function updateQuest(questId: string, input: QuestInput): Promise<void> {
   const db = await getDb();
-  await db.withTransactionAsync(async () => {
+  await db.runAsync(
+    `UPDATE quests SET title = ?, icon_emoji = ?, icon_uri = ?, reward_type = ?,
+      currency_value = ?, reward_item_name = ?, frequency = ?, requires_approval = ?
+     WHERE id = ?`,
+    input.title,
+    input.icon_emoji ?? null,
+    input.icon_uri ?? null,
+    input.reward_type,
+    input.currency_value,
+    input.reward_item_name ?? null,
+    input.frequency,
+    input.requires_approval ? 1 : 0,
+    questId,
+  );
+  await db.runAsync('DELETE FROM quest_children WHERE quest_id = ?', questId);
+  for (const cid of input.child_ids) {
     await db.runAsync(
-      `UPDATE quests SET title = ?, icon_emoji = ?, icon_uri = ?, reward_type = ?,
-        currency_value = ?, reward_item_name = ?, frequency = ?, requires_approval = ?
-       WHERE id = ?`,
-      input.title,
-      input.icon_emoji ?? null,
-      input.icon_uri ?? null,
-      input.reward_type,
-      input.currency_value,
-      input.reward_item_name ?? null,
-      input.frequency,
-      input.requires_approval ? 1 : 0,
+      'INSERT INTO quest_children (quest_id, child_id) VALUES (?, ?)',
       questId,
+      cid,
     );
-    await db.runAsync('DELETE FROM quest_children WHERE quest_id = ?', questId);
-    for (const cid of input.child_ids) {
-      await db.runAsync(
-        'INSERT INTO quest_children (quest_id, child_id) VALUES (?, ?)',
-        questId,
-        cid,
-      );
-    }
-  });
+  }
 }
 
 export async function duplicateQuest(questId: string): Promise<string> {
@@ -499,20 +493,18 @@ export async function approveAssignment(assignmentId: string): Promise<void> {
     assignmentId,
   );
   if (!row) throw new Error('Assignment not found');
-  await db.withTransactionAsync(async () => {
+  await db.runAsync(
+    `UPDATE quest_assignments SET status = 'approved', approved_at = ? WHERE id = ?`,
+    Date.now(),
+    assignmentId,
+  );
+  if (row.reward_type === 'currency') {
     await db.runAsync(
-      `UPDATE quest_assignments SET status = 'approved', approved_at = ? WHERE id = ?`,
-      Date.now(),
-      assignmentId,
+      'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+      row.currency_value,
+      row.child_id,
     );
-    if (row.reward_type === 'currency') {
-      await db.runAsync(
-        'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
-        row.currency_value,
-        row.child_id,
-      );
-    }
-  });
+  }
 }
 
 export async function denyAssignment(assignmentId: string): Promise<void> {
@@ -636,28 +628,26 @@ export async function markQuestDone(
   let awarded = false;
   let delta = 0;
 
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      `INSERT INTO quest_assignments (id, quest_id, child_id, due_date, status, photo_url, completed_at, approved_at)
-       VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)`,
-      id,
-      questId,
-      childId,
-      status,
-      now,
-      isInstant ? now : null,
-    );
+  await db.runAsync(
+    `INSERT INTO quest_assignments (id, quest_id, child_id, due_date, status, photo_url, completed_at, approved_at)
+     VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)`,
+    id,
+    questId,
+    childId,
+    status,
+    now,
+    isInstant ? now : null,
+  );
 
-    if (isInstant && quest.reward_type === 'currency') {
-      await db.runAsync(
-        'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
-        quest.currency_value,
-        childId,
-      );
-      awarded = true;
-      delta = quest.currency_value;
-    }
-  });
+  if (isInstant && quest.reward_type === 'currency') {
+    await db.runAsync(
+      'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+      quest.currency_value,
+      childId,
+    );
+    awarded = true;
+    delta = quest.currency_value;
+  }
 
   return { awarded, currency_delta: delta, assignment_id: id };
 }
@@ -774,22 +764,20 @@ export async function requestRedemption(
   const status: RedemptionStatus = isInstant ? 'approved' : 'pending';
   let newBalance = child.currency_balance;
 
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      'UPDATE children SET currency_balance = currency_balance - ? WHERE id = ?',
-      reward.currency_cost,
-      childId,
-    );
-    newBalance = child.currency_balance - reward.currency_cost;
-    await db.runAsync(
-      'INSERT INTO redemptions (id, reward_id, child_id, status, created_at) VALUES (?, ?, ?, ?, ?)',
-      id,
-      rewardId,
-      childId,
-      status,
-      Date.now(),
-    );
-  });
+  await db.runAsync(
+    'UPDATE children SET currency_balance = currency_balance - ? WHERE id = ?',
+    reward.currency_cost,
+    childId,
+  );
+  newBalance = child.currency_balance - reward.currency_cost;
+  await db.runAsync(
+    'INSERT INTO redemptions (id, reward_id, child_id, status, created_at) VALUES (?, ?, ?, ?, ?)',
+    id,
+    rewardId,
+    childId,
+    status,
+    Date.now(),
+  );
 
   return { instant: isInstant, redemption_id: id, new_balance: newBalance };
 }
@@ -815,17 +803,15 @@ export async function denyRedemption(redemptionId: string): Promise<void> {
     redemptionId,
   );
   if (!row) return;
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      `UPDATE redemptions SET status = 'rejected' WHERE id = ?`,
-      redemptionId,
-    );
-    await db.runAsync(
-      'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
-      row.currency_cost,
-      row.child_id,
-    );
-  });
+  await db.runAsync(
+    `UPDATE redemptions SET status = 'rejected' WHERE id = ?`,
+    redemptionId,
+  );
+  await db.runAsync(
+    'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+    row.currency_cost,
+    row.child_id,
+  );
 }
 
 export interface PendingRedemptionApproval {
