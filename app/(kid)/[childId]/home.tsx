@@ -101,6 +101,18 @@ export default function KidHome() {
           </View>
         )}
       </Pressable>
+
+      <Pressable
+        style={[styles.bigBtn, { backgroundColor: theme.colors.secondary }]}
+        onPress={() => router.push(`/(kid)/${child.id}/store`)}
+      >
+        <View>
+          <Text style={styles.bigBtnTitle}>Reward store 🎁</Text>
+          <Text style={styles.bigBtnSub}>
+            Spend your {theme.currency.pluralName}
+          </Text>
+        </View>
+      </Pressable>
     </ScrollView>
   );
 }

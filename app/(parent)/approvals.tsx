@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -12,21 +12,80 @@ import { useAppStore } from '../../lib/store';
 import {
   approveAssignment,
   denyAssignment,
+  approveRedemption,
+  denyRedemption,
   adjustChildCurrency,
 } from '../../lib/db';
 import { CurrencyAdjustModal } from '../../components/CurrencyAdjustModal';
 
+type Row =
+  | {
+      kind: 'quest';
+      id: string;
+      ts: number;
+      title: string;
+      icon_emoji: string | null;
+      icon_uri: string | null;
+      reward: string;
+      child_name: string;
+      child_color: string;
+      photo_url: string | null;
+    }
+  | {
+      kind: 'redemption';
+      id: string;
+      ts: number;
+      title: string;
+      icon_emoji: string | null;
+      icon_uri: string | null;
+      reward: string;
+      child_name: string;
+      child_color: string;
+    };
+
 export default function ApprovalsScreen() {
-  const { approvals, children, refreshAll } = useAppStore();
+  const { approvals, redemptionApprovals, children, refreshAll } = useAppStore();
   const [assignOpen, setAssignOpen] = useState(false);
 
-  const handleApprove = async (id: string) => {
-    await approveAssignment(id);
+  const rows: Row[] = useMemo(() => {
+    const a: Row[] = approvals.map((x) => ({
+      kind: 'quest' as const,
+      id: x.assignment_id,
+      ts: x.completed_at,
+      title: x.quest_title,
+      icon_emoji: x.quest_icon_emoji,
+      icon_uri: x.quest_icon_uri,
+      reward:
+        x.reward_type === 'currency'
+          ? `+${x.currency_value} currency`
+          : (x.reward_item_name ?? 'Reward'),
+      child_name: x.child_name,
+      child_color: x.child_color,
+      photo_url: x.photo_url,
+    }));
+    const b: Row[] = redemptionApprovals.map((x) => ({
+      kind: 'redemption' as const,
+      id: x.redemption_id,
+      ts: x.created_at,
+      title: x.reward_title,
+      icon_emoji: x.reward_icon_emoji,
+      icon_uri: x.reward_icon_uri,
+      reward: `-${x.currency_cost} currency`,
+      child_name: x.child_name,
+      child_color: x.child_color,
+    }));
+    return [...a, ...b].sort((p, q) => p.ts - q.ts);
+  }, [approvals, redemptionApprovals]);
+
+  const handleApprove = async (row: Row) => {
+    if (row.kind === 'quest') await approveAssignment(row.id);
+    else await approveRedemption(row.id);
     await refreshAll();
   };
 
-  const handleDeny = async (id: string) => {
-    await denyAssignment(id);
+  const handleDeny = async (row: Row) => {
+    if (row.kind === 'quest') await denyAssignment(row.id);
+    else await denyRedemption(row.id);
     await refreshAll();
   };
 
@@ -50,50 +109,59 @@ export default function ApprovalsScreen() {
       />
 
       <ScrollView contentContainerStyle={styles.list}>
-        {approvals.length === 0 ? (
+        {rows.length === 0 ? (
           <Text style={styles.empty}>
             Nothing waiting for approval. Use “+ Currency” to award bonus currency.
           </Text>
         ) : (
-          approvals.map((a) => (
-            <View key={a.assignment_id} style={styles.card}>
+          rows.map((r) => (
+            <View key={`${r.kind}-${r.id}`} style={styles.card}>
               <View style={styles.cardTop}>
                 <View style={styles.iconBox}>
-                  {a.quest_icon_uri ? (
-                    <Image source={{ uri: a.quest_icon_uri }} style={styles.iconImg} />
+                  {r.icon_uri ? (
+                    <Image source={{ uri: r.icon_uri }} style={styles.iconImg} />
                   ) : (
-                    <Text style={styles.iconEmoji}>{a.quest_icon_emoji ?? '⭐'}</Text>
+                    <Text style={styles.iconEmoji}>
+                      {r.icon_emoji ?? (r.kind === 'quest' ? '⭐' : '🎁')}
+                    </Text>
                   )}
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.title}>{a.quest_title}</Text>
-                  <Text style={styles.sub}>
-                    Reward:{' '}
-                    {a.reward_type === 'currency'
-                      ? `${a.currency_value} currency`
-                      : a.reward_item_name ?? '—'}
-                  </Text>
+                  <View style={styles.titleRow}>
+                    <Text style={styles.title}>{r.title}</Text>
+                    <View
+                      style={[
+                        styles.tag,
+                        r.kind === 'quest' ? styles.tagQuest : styles.tagReward,
+                      ]}
+                    >
+                      <Text style={styles.tagText}>
+                        {r.kind === 'quest' ? 'Task' : 'Reward'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.sub}>{r.reward}</Text>
                   <View style={styles.childRow}>
-                    <View style={[styles.childDot, { backgroundColor: a.child_color }]} />
-                    <Text style={styles.childName}>{a.child_name}</Text>
+                    <View style={[styles.childDot, { backgroundColor: r.child_color }]} />
+                    <Text style={styles.childName}>{r.child_name}</Text>
                   </View>
                 </View>
               </View>
 
-              {a.photo_url && (
-                <Image source={{ uri: a.photo_url }} style={styles.proofImg} />
+              {r.kind === 'quest' && r.photo_url && (
+                <Image source={{ uri: r.photo_url }} style={styles.proofImg} />
               )}
 
               <View style={styles.actions}>
                 <Pressable
                   style={[styles.actionBtn, styles.denyBtn]}
-                  onPress={() => handleDeny(a.assignment_id)}
+                  onPress={() => handleDeny(r)}
                 >
                   <Text style={styles.denyText}>Deny</Text>
                 </Pressable>
                 <Pressable
                   style={[styles.actionBtn, styles.approveBtn]}
-                  onPress={() => handleApprove(a.assignment_id)}
+                  onPress={() => handleApprove(r)}
                 >
                   <Text style={styles.approveText}>Approve</Text>
                 </Pressable>
@@ -136,7 +204,12 @@ const styles = StyleSheet.create({
   },
   iconImg: { width: '100%', height: '100%' },
   iconEmoji: { fontSize: 28 },
-  title: { fontSize: 16, fontWeight: '600' },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  title: { fontSize: 16, fontWeight: '600', flex: 1 },
+  tag: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+  tagQuest: { backgroundColor: '#E0F4F8' },
+  tagReward: { backgroundColor: '#FFE5D9' },
+  tagText: { fontSize: 11, fontWeight: '700', color: '#073B4C' },
   sub: { fontSize: 13, color: '#666', marginTop: 2 },
   childRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 6 },
   childDot: { width: 12, height: 12, borderRadius: 6 },

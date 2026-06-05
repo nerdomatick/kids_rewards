@@ -5,7 +5,8 @@ import { themes } from '../../lib/themes';
 
 export default function ParentDashboard() {
   const router = useRouter();
-  const { family, children, quests, approvals } = useAppStore();
+  const { family, children, quests, rewards, approvals, redemptionApprovals } = useAppStore();
+  const pendingCount = approvals.length + redemptionApprovals.length;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -13,13 +14,13 @@ export default function ParentDashboard() {
 
       <Text style={styles.h1}>{family?.name ?? 'Family'}</Text>
 
-      {approvals.length > 0 && (
+      {pendingCount > 0 && (
         <Pressable
           style={styles.banner}
           onPress={() => router.push('/(parent)/approvals')}
         >
           <Text style={styles.bannerText}>
-            {approvals.length} task{approvals.length === 1 ? '' : 's'} waiting for approval
+            {pendingCount} item{pendingCount === 1 ? '' : 's'} waiting for approval
           </Text>
           <Text style={styles.bannerArrow}>›</Text>
         </Pressable>
@@ -67,10 +68,14 @@ export default function ParentDashboard() {
         />
         <Tile
           label="Approvals"
-          sub={approvals.length ? `${approvals.length} pending` : 'Nothing pending'}
+          sub={pendingCount ? `${pendingCount} pending` : 'Nothing pending'}
           onPress={() => router.push('/(parent)/approvals')}
         />
-        <Tile label="Rewards" sub="Coming soon" onPress={() => router.push('/(parent)/rewards')} />
+        <Tile
+          label="Rewards"
+          sub={`${rewards.length} active`}
+          onPress={() => router.push('/(parent)/rewards')}
+        />
         <Tile label="Behavior" sub="Coming soon" onPress={() => router.push('/(parent)/behavior')} />
         <Tile label="Ledger" sub="Coming soon" onPress={() => router.push('/(parent)/ledger')} />
       </View>

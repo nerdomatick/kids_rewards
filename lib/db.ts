@@ -3,7 +3,7 @@ import type { ThemeId } from './themes';
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (dbInstance) return dbInstance;
@@ -102,7 +102,8 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       id TEXT PRIMARY KEY,
       family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
-      icon TEXT,
+      icon_emoji TEXT,
+      icon_uri TEXT,
       currency_cost INTEGER NOT NULL,
       redemption_mode TEXT NOT NULL DEFAULT 'approval',
       real_money_value_cents INTEGER,
@@ -659,4 +660,237 @@ export async function markQuestDone(
   });
 
   return { awarded, currency_delta: delta, assignment_id: id };
+}
+
+// ----- Rewards -----
+
+export type RedemptionMode = 'instant' | 'approval';
+export type RedemptionStatus = 'pending' | 'approved' | 'rejected';
+
+export interface Reward {
+  id: string;
+  family_id: string;
+  title: string;
+  icon_emoji: string | null;
+  icon_uri: string | null;
+  currency_cost: number;
+  redemption_mode: RedemptionMode;
+  real_money_value_cents: number | null;
+  is_active: number;
+  created_at: number;
+}
+
+export interface RewardInput {
+  title: string;
+  icon_emoji?: string | null;
+  icon_uri?: string | null;
+  currency_cost: number;
+  redemption_mode: RedemptionMode;
+  real_money_value_cents?: number | null;
+}
+
+export async function listRewards(familyId: string): Promise<Reward[]> {
+  const db = await getDb();
+  return db.getAllAsync<Reward>(
+    'SELECT * FROM rewards WHERE family_id = ? AND is_active = 1 ORDER BY created_at DESC',
+    familyId,
+  );
+}
+
+export async function addReward(familyId: string, input: RewardInput): Promise<string> {
+  const db = await getDb();
+  const id = uuid();
+  await db.runAsync(
+    `INSERT INTO rewards (id, family_id, title, icon_emoji, icon_uri, currency_cost,
+      redemption_mode, real_money_value_cents, is_active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+    id,
+    familyId,
+    input.title,
+    input.icon_emoji ?? null,
+    input.icon_uri ?? null,
+    input.currency_cost,
+    input.redemption_mode,
+    input.real_money_value_cents ?? null,
+    Date.now(),
+  );
+  return id;
+}
+
+export async function updateReward(rewardId: string, input: RewardInput): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE rewards SET title = ?, icon_emoji = ?, icon_uri = ?, currency_cost = ?,
+      redemption_mode = ?, real_money_value_cents = ?
+     WHERE id = ?`,
+    input.title,
+    input.icon_emoji ?? null,
+    input.icon_uri ?? null,
+    input.currency_cost,
+    input.redemption_mode,
+    input.real_money_value_cents ?? null,
+    rewardId,
+  );
+}
+
+export async function deleteReward(rewardId: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM rewards WHERE id = ?', rewardId);
+}
+
+// ----- Redemptions -----
+
+export interface RedemptionResult {
+  instant: boolean;
+  redemption_id: string;
+  new_balance: number;
+}
+
+/**
+ * Kid requests a reward. Always deducts currency immediately
+ * (refunded if a pending approval is denied). Status depends on reward.redemption_mode.
+ */
+export async function requestRedemption(
+  rewardId: string,
+  childId: string,
+): Promise<RedemptionResult> {
+  const db = await getDb();
+  const reward = await db.getFirstAsync<Reward>(
+    'SELECT * FROM rewards WHERE id = ?',
+    rewardId,
+  );
+  if (!reward) throw new Error('Reward not found');
+  const child = await db.getFirstAsync<Child>(
+    'SELECT * FROM children WHERE id = ?',
+    childId,
+  );
+  if (!child) throw new Error('Child not found');
+  if (child.currency_balance < reward.currency_cost) {
+    throw new Error('Not enough currency');
+  }
+
+  const id = uuid();
+  const isInstant = reward.redemption_mode === 'instant';
+  const status: RedemptionStatus = isInstant ? 'approved' : 'pending';
+  let newBalance = child.currency_balance;
+
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      'UPDATE children SET currency_balance = currency_balance - ? WHERE id = ?',
+      reward.currency_cost,
+      childId,
+    );
+    newBalance = child.currency_balance - reward.currency_cost;
+    await db.runAsync(
+      'INSERT INTO redemptions (id, reward_id, child_id, status, created_at) VALUES (?, ?, ?, ?, ?)',
+      id,
+      rewardId,
+      childId,
+      status,
+      Date.now(),
+    );
+  });
+
+  return { instant: isInstant, redemption_id: id, new_balance: newBalance };
+}
+
+export async function approveRedemption(redemptionId: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE redemptions SET status = 'approved' WHERE id = ? AND status = 'pending'`,
+    redemptionId,
+  );
+}
+
+export async function denyRedemption(redemptionId: string): Promise<void> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{
+    reward_id: string;
+    child_id: string;
+    currency_cost: number;
+  }>(
+    `SELECT r.id AS reward_id, r.child_id AS child_id, w.currency_cost AS currency_cost
+     FROM redemptions r JOIN rewards w ON w.id = r.reward_id
+     WHERE r.id = ? AND r.status = 'pending'`,
+    redemptionId,
+  );
+  if (!row) return;
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `UPDATE redemptions SET status = 'rejected' WHERE id = ?`,
+      redemptionId,
+    );
+    await db.runAsync(
+      'UPDATE children SET currency_balance = currency_balance + ? WHERE id = ?',
+      row.currency_cost,
+      row.child_id,
+    );
+  });
+}
+
+export interface PendingRedemptionApproval {
+  redemption_id: string;
+  reward_id: string;
+  reward_title: string;
+  reward_icon_emoji: string | null;
+  reward_icon_uri: string | null;
+  currency_cost: number;
+  child_id: string;
+  child_name: string;
+  child_color: string;
+  created_at: number;
+}
+
+export async function listPendingRedemptionApprovals(
+  familyId: string,
+): Promise<PendingRedemptionApproval[]> {
+  const db = await getDb();
+  return db.getAllAsync<PendingRedemptionApproval>(
+    `SELECT
+       r.id AS redemption_id,
+       w.id AS reward_id,
+       w.title AS reward_title,
+       w.icon_emoji AS reward_icon_emoji,
+       w.icon_uri AS reward_icon_uri,
+       w.currency_cost AS currency_cost,
+       c.id AS child_id,
+       c.name AS child_name,
+       c.color AS child_color,
+       r.created_at AS created_at
+     FROM redemptions r
+     JOIN rewards w ON w.id = r.reward_id
+     JOIN children c ON c.id = r.child_id
+     WHERE r.status = 'pending' AND w.family_id = ?
+     ORDER BY r.created_at ASC`,
+    familyId,
+  );
+}
+
+export interface KidPendingRedemption {
+  redemption_id: string;
+  reward_title: string;
+  reward_icon_emoji: string | null;
+  reward_icon_uri: string | null;
+  currency_cost: number;
+  created_at: number;
+}
+
+export async function listKidPendingRedemptions(
+  childId: string,
+): Promise<KidPendingRedemption[]> {
+  const db = await getDb();
+  return db.getAllAsync<KidPendingRedemption>(
+    `SELECT
+       r.id AS redemption_id,
+       w.title AS reward_title,
+       w.icon_emoji AS reward_icon_emoji,
+       w.icon_uri AS reward_icon_uri,
+       w.currency_cost AS currency_cost,
+       r.created_at AS created_at
+     FROM redemptions r
+     JOIN rewards w ON w.id = r.reward_id
+     WHERE r.status = 'pending' AND r.child_id = ?
+     ORDER BY r.created_at ASC`,
+    childId,
+  );
 }
