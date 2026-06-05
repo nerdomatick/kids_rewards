@@ -14,23 +14,38 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   const row = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  const current = row?.user_version ?? 0;
+  const current = Number(row?.user_version ?? 0) || 0;
 
-  if (current < SCHEMA_VERSION) {
+  // Self-healing check: even if user_version looks current, verify the actual
+  // schema of a few key tables has the columns we expect.
+  const tables = await db.getAllAsync<{ name: string; sql: string | null }>(
+    "SELECT name, sql FROM sqlite_master WHERE type='table'",
+  );
+  const tableMap = new Map(tables.map((t) => [t.name, t.sql ?? '']));
+  const schemaOutdated =
+    (tableMap.has('rewards') && !tableMap.get('rewards')!.includes('icon_emoji')) ||
+    (tableMap.has('quests') && !tableMap.get('quests')!.includes('reward_type')) ||
+    (tableMap.has('children') && !tableMap.get('children')!.includes('avatar_emoji'));
+
+  if (current < SCHEMA_VERSION || schemaOutdated) {
     // Pre-launch: drop and recreate. Replace with proper migrations after first release.
-    await db.execAsync(`
-      DROP TABLE IF EXISTS money_ledger;
-      DROP TABLE IF EXISTS map_progress;
-      DROP TABLE IF EXISTS badges;
-      DROP TABLE IF EXISTS redemptions;
-      DROP TABLE IF EXISTS rewards;
-      DROP TABLE IF EXISTS behavior_events;
-      DROP TABLE IF EXISTS quest_assignments;
-      DROP TABLE IF EXISTS quest_children;
-      DROP TABLE IF EXISTS quests;
-      DROP TABLE IF EXISTS children;
-      DROP TABLE IF EXISTS families;
-    `);
+    // Drop one statement at a time so a single failure can't leave us partially migrated.
+    const dropTargets = [
+      'money_ledger',
+      'map_progress',
+      'badges',
+      'redemptions',
+      'rewards',
+      'behavior_events',
+      'quest_assignments',
+      'quest_children',
+      'quests',
+      'children',
+      'families',
+    ];
+    for (const t of dropTargets) {
+      await db.execAsync(`DROP TABLE IF EXISTS ${t};`);
+    }
   }
 
   await db.execAsync(`
